@@ -1,30 +1,23 @@
+const { 
+  Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, 
+  StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, 
+  ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, AttachmentBuilder,
+  REST, Routes, SlashCommandBuilder
+} = require('discord.js');
+const fs = require('fs');
 const http = require('http');
 
-// Server HTTP dummy pentru a menține Render fericit
+// ==================== DUMMY HTTP SERVER PENTRU RENDER ====================
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.write('TITAN Market Bot is active!');
+  res.write('TITAN Market Bot is online 24/7!');
   res.end();
 }).listen(PORT, () => {
-  console.log(`🌐 Dummy Web Server pornit pe portul ${PORT}`);
-});
-const { Client, GatewayIntentBits } = require('discord.js');
-
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
-  ]
+  console.log(`🌐 Web Server pornit pe portul ${PORT} pentru Render.`);
 });
 
-client.once('ready', () => {
-  console.log(`🚀 [TITAN MARKET BOT] Pornit cu succes ca ${client.user.tag}`);
-});
-const fs = require('fs');
-
+// ==================== DISCORD CLIENT SETUP ====================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -64,10 +57,10 @@ const BANNERS = {
 const COLOR_CYAN = '#00E5FF';
 const COLOR_VIOLET = '#7C4DFF';
 const PREFIX = '+';
-const TOKEN = process.env.DISCORD_TOKEN || 'YOUR_BOT_TOKEN_HERE';
+const TOKEN = process.env.DISCORD_TOKEN;
 const DEFAULT_LOGS_CHANNEL = '1544942985450627072';
 
-// BAZĂ DE DATE LOCALĂ
+// ==================== DATABASE ====================
 let db = {
   welcomeChannel: null,
   byeChannel: null,
@@ -119,7 +112,7 @@ const slashCommands = [
 client.once('ready', async () => {
   console.log(`\n==============================================`);
   console.log(`🚀 [TITAN MARKET BOT] Online as ${client.user.tag}`);
-  console.log(`⚡ Hosted on Discloud | Status: OPTIMAL`);
+  console.log(`⚡ Hosted Status: OPTIMAL`);
   console.log(`==============================================\n`);
 
   let statusIndex = 0;
@@ -431,7 +424,7 @@ client.on('interactionCreate', async (interaction) => {
 
       const buffer = Buffer.from(transcriptText, 'utf-8');
 
-      // 1. Trimite Transcriptul în Canalul de Log-uri
+      // 1. Send Transcript to Logs Channel
       const targetLogsId = db.logsChannel || DEFAULT_LOGS_CHANNEL;
       const logChannel = interaction.guild.channels.cache.get(targetLogsId);
       if (logChannel) {
@@ -439,7 +432,7 @@ client.on('interactionCreate', async (interaction) => {
         logChannel.send({ content: `📁 **Transcript for ${interaction.channel.name}**`, files: [attachmentLog] });
       }
 
-      // 2. Trimite Transcriptul în DM-ul Utilizatorului care a deschis Ticketul
+      // 2. Send Transcript to DM of Ticket Owner
       let ticketOwner = interaction.user;
       const userOverwrite = interaction.channel.permissionOverwrites.cache.find(
         ow => ow.type === 1 && ow.id !== client.user.id && ow.id !== interaction.guild.id
@@ -457,7 +450,7 @@ client.on('interactionCreate', async (interaction) => {
             files: [attachmentDM] 
           });
         } catch (e) {
-          console.log(`Notificarea în DM nu a putut fi trimisă utilizatorului ${ticketOwner.tag} (are DM-ul închis).`);
+          console.log(`Could not send DM transcript to ${ticketOwner.tag}`);
         }
       }
 
@@ -649,5 +642,4 @@ async function handleClearCommand(ctx, amount) {
   else ctx.channel.send(msg).then(m => setTimeout(() => m.delete(), 3000));
 }
 
-// Token preluat automat de pe Render:
-client.login(process.env.DISCORD_TOKEN);
+client.login(TOKEN);
