@@ -23,14 +23,6 @@ const client = new Client({
 client.once('ready', () => {
   console.log(`🚀 [TITAN MARKET BOT] Pornit cu succes ca ${client.user.tag}`);
 });
-
-// Aici vine restul codului tău pentru comenzi, tickete, vouch-uri etc.
-const { 
-  Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, 
-  StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, 
-  ChannelType, ModalBuilder, TextInputBuilder, TextInputStyle, AttachmentBuilder,
-  REST, Routes, SlashCommandBuilder
-} = require('discord.js');
 const fs = require('fs');
 
 const client = new Client({
