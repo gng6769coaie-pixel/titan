@@ -58,7 +58,7 @@ const COLOR_CYAN = '#00E5FF';
 const COLOR_VIOLET = '#7C4DFF';
 const PREFIX = '+';
 const TOKEN = process.env.DISCORD_TOKEN;
-const DEFAULT_LOGS_CHANNEL = '1544942985450627072';
+const DEFAULT_LOGS_CHANNEL = '1544967779273412669';
 
 // ==================== DATABASE ====================
 let db = {
@@ -82,6 +82,23 @@ const saveDB = () => fs.writeFileSync('./db.json', JSON.stringify(db, null, 2));
 
 const guildInvites = new Map();
 
+// ==================== DURATION PARSER HELPER ====================
+function parseDuration(str) {
+  if (!str) return null;
+  const match = str.match(/^(\d+)([s|m|h|d|w])$/i);
+  if (!match) return null;
+  const num = parseInt(match[1]);
+  const unit = match[2].toLowerCase();
+  switch (unit) {
+    case 's': return num * 1000;
+    case 'm': return num * 60 * 1000;
+    case 'h': return num * 60 * 60 * 1000;
+    case 'd': return num * 24 * 60 * 60 * 1000;
+    case 'w': return num * 7 * 24 * 60 * 60 * 1000;
+    default: return null;
+  }
+}
+
 // ==================== SLASH COMMANDS ====================
 const slashCommands = [
   new SlashCommandBuilder().setName('panel').setDescription('Displays the main TITAN Market support ticket panel'),
@@ -103,9 +120,23 @@ const slashCommands = [
   new SlashCommandBuilder().setName('clear').setDescription('Purge a specified number of messages from the channel')
     .addIntegerOption(opt => opt.setName('amount').setDescription('Number of messages (1-100)').setRequired(true)),
   new SlashCommandBuilder().setName('giveaway').setDescription('Host a TITAN Market giveaway')
-    .addStringOption(opt => opt.setName('duration').setDescription('Duration (e.g., 1h, 1d)').setRequired(true))
+    .addStringOption(opt => opt.setName('duration').setDescription('Duration (e.g., 10s, 1m, 1h, 1d)').setRequired(true))
     .addIntegerOption(opt => opt.setName('winners').setDescription('Number of winners').setRequired(true))
-    .addStringOption(opt => opt.setName('prize').setDescription('Prize description').setRequired(true))
+    .addStringOption(opt => opt.setName('prize').setDescription('Prize description').setRequired(true)),
+  new SlashCommandBuilder().setName('gend').setDescription('Force end an active giveaway')
+    .addStringOption(opt => opt.setName('message_id').setDescription('The Giveaway Message ID').setRequired(true)),
+  new SlashCommandBuilder().setName('greroll').setDescription('Reroll a new winner for an ended giveaway')
+    .addStringOption(opt => opt.setName('message_id').setDescription('The Giveaway Message ID').setRequired(true)),
+  new SlashCommandBuilder().setName('gedit').setDescription('Edit an active giveaway')
+    .addStringOption(opt => opt.setName('message_id').setDescription('The Giveaway Message ID').setRequired(true))
+    .addStringOption(opt => opt.setName('prize').setDescription('New prize description').setRequired(false))
+    .addIntegerOption(opt => opt.setName('winners').setDescription('New number of winners').setRequired(false)),
+  new SlashCommandBuilder().setName('setwelcome').setDescription('Set the welcome message channel')
+    .addChannelOption(opt => opt.setName('channel').setDescription('Target channel').setRequired(true)),
+  new SlashCommandBuilder().setName('setbye').setDescription('Set the leave/bye message channel')
+    .addChannelOption(opt => opt.setName('channel').setDescription('Target channel').setRequired(true)),
+  new SlashCommandBuilder().setName('setlogs').setDescription('Set the logs & transcripts channel')
+    .addChannelOption(opt => opt.setName('channel').setDescription('Target channel').setRequired(true))
 ].map(cmd => cmd.toJSON());
 
 // ==================== READY EVENT ====================
@@ -126,6 +157,9 @@ client.once('ready', async () => {
     statusIndex = (statusIndex + 1) % statuses.length;
   }, 15000);
 
+  // Verificare automata giveaways la fiecare 10 secunde
+  setInterval(checkGiveaways, 10000);
+
   try {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     await rest.put(Routes.applicationCommands(client.user.id), { body: slashCommands });
@@ -141,6 +175,84 @@ client.once('ready', async () => {
     } catch (e) {}
   });
 });
+
+// ==================== GIVEAWAY AUTOMATION ENGINE ====================
+async function checkGiveaways() {
+  const now = Date.now();
+  for (const [msgId, gw] of Object.entries(db.giveaways)) {
+    if (!gw.ended && gw.endTime <= now) {
+      await endGiveaway(msgId);
+    }
+  }
+}
+
+async function endGiveaway(msgId) {
+  const gw = db.giveaways[msgId];
+  if (!gw || gw.ended) return;
+
+  gw.ended = true;
+  saveDB();
+
+  try {
+    const channel = await client.channels.fetch(gw.channelId).catch(() => null);
+    if (!channel) return;
+    const msg = await channel.messages.fetch(msgId).catch(() => null);
+
+    let winners = [];
+    if (gw.participants && gw.participants.length > 0) {
+      const pool = [...new Set(gw.participants)];
+      const count = Math.min(gw.winners, pool.length);
+      for (let i = 0; i < count; i++) {
+        const randIndex = Math.floor(Math.random() * pool.length);
+        winners.push(pool.splice(randIndex, 1)[0]);
+      }
+    }
+
+    gw.winnerIds = winners;
+    saveDB();
+
+    const winnersText = winners.length > 0 ? winners.map(w => `<@${w}>`).join(', ') : 'No valid participants';
+
+    if (msg) {
+      const endedEmbed = new EmbedBuilder()
+        .setColor('#FF0055')
+        .setTitle(`${EMOJIS.giveaway} TITAN GIVEAWAY ENDED: ${gw.prize}`)
+        .setImage(BANNERS.giveaways)
+        .setDescription(`\n• **Winner(s):** ${winnersText}\n• **Hosted by:** <@${gw.hostId}>\n• **Total Entries:** \`${gw.participants ? gw.participants.length : 0}\``)
+        .setFooter({ text: 'TITAN Market™ • Official Giveaways Ended' })
+        .setTimestamp();
+
+      const disabledBtn = new ButtonBuilder()
+        .setCustomId('join_gw_disabled')
+        .setLabel(`Ended (${gw.participants ? gw.participants.length : 0})`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true);
+
+      await msg.edit({ embeds: [endedEmbed], components: [new ActionRowBuilder().addComponents(disabledBtn)] });
+    }
+
+    if (winners.length > 0) {
+      channel.send(`🎉 Congratulations ${winnersText}! You won **${gw.prize}**! Contact <@${gw.hostId}> to claim your prize!`);
+    } else {
+      channel.send(`⚠️ Giveaway for **${gw.prize}** ended, but there were no valid participants.`);
+    }
+  } catch (err) {
+    console.error('Error ending giveaway:', err);
+  }
+}
+
+async function rerollGiveaway(msgId, channel) {
+  const gw = db.giveaways[msgId];
+  if (!gw) return { success: false, message: '❌ Giveaway not found in database!' };
+  if (!gw.ended) return { success: false, message: '❌ This giveaway has not ended yet!' };
+  if (!gw.participants || gw.participants.length === 0) return { success: false, message: '❌ No participants in this giveaway to reroll!' };
+
+  const pool = [...new Set(gw.participants)];
+  const newWinnerId = pool[Math.floor(Math.random() * pool.length)];
+
+  await channel.send(`🎉 **REROLL!** The new winner for **${gw.prize}** is <@${newWinnerId}>! Congratulations! 🎁`);
+  return { success: true };
+}
 
 // ==================== INVITE TRACKER EVENTS ====================
 client.on('guildMemberAdd', async (member) => {
@@ -238,6 +350,31 @@ client.on('messageCreate', async (message) => {
     if (cmd === 'invitelist') handleInviteListCommand(message, message.mentions.users.first() || message.author);
     if (cmd === 'topinvites') handleTopInvitesCommand(message);
     if (cmd === 'clear') handleClearCommand(message, parseInt(args[0]));
+
+    if (cmd === 'gend') {
+      const msgId = args[0];
+      if (!msgId) return message.reply('❌ Usage: `+gend <message_id>`');
+      await endGiveaway(msgId);
+      return message.reply(`✅ Giveaway \`${msgId}\` has been ended.`);
+    }
+
+    if (cmd === 'greroll') {
+      const msgId = args[0];
+      if (!msgId) return message.reply('❌ Usage: `+greroll <message_id>`');
+      const res = await rerollGiveaway(msgId, message.channel);
+      if (!res.success) return message.reply(res.message);
+    }
+
+    if (cmd === 'gedit') {
+      const msgId = args[0];
+      const newPrize = args.slice(1).join(' ');
+      if (!msgId || !newPrize) return message.reply('❌ Usage: `+gedit <message_id> <new_prize>`');
+      const gw = db.giveaways[msgId];
+      if (!gw) return message.reply('❌ Giveaway not found!');
+      gw.prize = newPrize;
+      saveDB();
+      return message.reply(`✅ Giveaway \`${msgId}\` prize updated to: **${newPrize}**`);
+    }
   }
 });
 
@@ -247,6 +384,36 @@ client.on('interactionCreate', async (interaction) => {
   // --- 1. SLASH COMMANDS ---
   if (interaction.isChatInputCommand()) {
     const { commandName, options } = interaction;
+
+    if (commandName === 'setwelcome') {
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+      }
+      const ch = options.getChannel('channel');
+      db.welcomeChannel = ch.id;
+      saveDB();
+      return interaction.reply({ content: `✅ Welcome channel set to ${ch}`, ephemeral: true });
+    }
+
+    if (commandName === 'setbye') {
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+      }
+      const ch = options.getChannel('channel');
+      db.byeChannel = ch.id;
+      saveDB();
+      return interaction.reply({ content: `✅ Bye channel set to ${ch}`, ephemeral: true });
+    }
+
+    if (commandName === 'setlogs') {
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+      }
+      const ch = options.getChannel('channel');
+      db.logsChannel = ch.id;
+      saveDB();
+      return interaction.reply({ content: `✅ Logs & Transcripts channel set to ${ch}`, ephemeral: true });
+    }
 
     if (commandName === 'panel') {
       if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -294,75 +461,82 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (commandName === 'giveaway') {
-      const duration = options.getString('duration');
+      const durationStr = options.getString('duration');
       const winners = options.getInteger('winners');
       const prize = options.getString('prize');
+
+      const durationMs = parseDuration(durationStr);
+      if (!durationMs) {
+        return interaction.reply({ content: '❌ Invalid duration format! Use e.g. `10s`, `1m`, `1h`, `1d`.', ephemeral: true });
+      }
+
+      const endTime = Date.now() + durationMs;
+      const endTimestamp = Math.floor(endTime / 1000);
 
       const embed = new EmbedBuilder()
         .setColor(COLOR_VIOLET)
         .setTitle(`${EMOJIS.giveaway} TITAN GIVEAWAY: ${prize}`)
         .setImage(BANNERS.giveaways)
-        .setDescription(`\n• **Winners:** \`${winners}\`\n• **Duration:** \`${duration}\`\n• **Host:** ${interaction.user}\n\nClick the button below to join!`)
+        .setDescription(`\n• **Winners:** \`${winners}\`\n• **Ends:** <t:${endTimestamp}:R> (<t:${endTimestamp}:f>)\n• **Host:** ${interaction.user}\n\nClick the button below to join!`)
         .setFooter({ text: 'TITAN Market™ • Official Giveaways' });
 
       const btn = new ButtonBuilder().setCustomId('join_gw').setLabel('Join (0)').setStyle(ButtonStyle.Primary).setEmoji('🎉');
       const row = new ActionRowBuilder().addComponents(btn);
 
       const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
-      db.giveaways[msg.id] = { winners, prize, participants: [], channelId: interaction.channelId };
+      db.giveaways[msg.id] = { 
+        winners, 
+        prize, 
+        participants: [], 
+        channelId: interaction.channelId, 
+        endTime, 
+        hostId: interaction.user.id, 
+        ended: false 
+      };
       saveDB();
+    }
+
+    if (commandName === 'gend') {
+      const msgId = options.getString('message_id');
+      const gw = db.giveaways[msgId];
+      if (!gw) return interaction.reply({ content: '❌ Giveaway not found with that message ID!', ephemeral: true });
+      if (gw.ended) return interaction.reply({ content: '⚠️ This giveaway has already ended!', ephemeral: true });
+
+      await endGiveaway(msgId);
+      return interaction.reply({ content: `✅ Giveaway \`${msgId}\` ended successfully!` });
+    }
+
+    if (commandName === 'greroll') {
+      const msgId = options.getString('message_id');
+      const res = await rerollGiveaway(msgId, interaction.channel);
+      if (!res.success) return interaction.reply({ content: res.message, ephemeral: true });
+      return interaction.reply({ content: `✅ Reroll complete for giveaway \`${msgId}\`!` });
+    }
+
+    if (commandName === 'gedit') {
+      const msgId = options.getString('message_id');
+      const newPrize = options.getString('prize');
+      const newWinners = options.getInteger('winners');
+
+      const gw = db.giveaways[msgId];
+      if (!gw) return interaction.reply({ content: '❌ Giveaway not found!', ephemeral: true });
+
+      if (newPrize) gw.prize = newPrize;
+      if (newWinners) gw.winners = newWinners;
+      saveDB();
+
+      return interaction.reply({ content: `✅ Giveaway \`${msgId}\` updated successfully!` });
     }
   }
 
-  // --- 2. SELECT MENU (TICKETS) ---
+  // --- 2. SELECT MENU (CREARE DIRECTA TICKET) ---
   if (interaction.isStringSelectMenu() && interaction.customId === 'select_ticket_type') {
     const selectedType = interaction.values[0];
-
-    const modal = new ModalBuilder()
-      .setCustomId(`modal_ticket_${selectedType}`)
-      .setTitle(`TITAN Market Order - ${selectedType.toUpperCase()}`);
-
-    const inputProduct = new TextInputBuilder()
-      .setCustomId('ticket_product')
-      .setLabel('What product/service do you want?')
-      .setPlaceholder('e.g., Nitro Boost 1 Year / 14 Server Boosts')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
-
-    const inputPayment = new TextInputBuilder()
-      .setCustomId('ticket_payment')
-      .setLabel('Preferred payment method:')
-      .setPlaceholder('e.g., Revolut / Crypto (LTC, USDT) / PayPal / Card')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true);
-
-    const inputDetails = new TextInputBuilder()
-      .setCustomId('ticket_details')
-      .setLabel('Additional details / Budget:')
-      .setPlaceholder('Enter any additional details here...')
-      .setStyle(TextInputStyle.Paragraph)
-      .setRequired(false);
-
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(inputProduct),
-      new ActionRowBuilder().addComponents(inputPayment),
-      new ActionRowBuilder().addComponents(inputDetails)
-    );
-
-    await interaction.showModal(modal);
-  }
-
-  // --- 3. MODAL SUBMIT ---
-  if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_ticket_')) {
-    const type = interaction.customId.replace('modal_ticket_', '');
-    const product = interaction.fields.getTextInputValue('ticket_product');
-    const payment = interaction.fields.getTextInputValue('ticket_payment');
-    const details = interaction.fields.getTextInputValue('ticket_details') || 'No additional details provided';
 
     db.ticketCount += 1;
     saveDB();
 
-    const channelName = `ticket-${type}-${db.ticketCount}`;
+    const channelName = `ticket-${selectedType}-${db.ticketCount}`;
     const channel = await interaction.guild.channels.create({
       name: channelName,
       type: ChannelType.GuildText,
@@ -376,13 +550,10 @@ client.on('interactionCreate', async (interaction) => {
       .setColor(COLOR_CYAN)
       .setTitle(`${EMOJIS.ticket} TITAN Market™ — New Ticket`)
       .setDescription(
-        `👋 **Hello ${interaction.user}!** A member of our support team will assist you shortly.\n\n` +
-        `${EMOJIS.issue} **Order Form Details:**\n` +
-        `• **Category:** \`${type.toUpperCase()}\`\n` +
-        `• **Requested Product:** \`${product}\`\n` +
-        `• **Payment Method:** \`${payment}\`\n` +
-        `• **Details:** ${details}\n\n` +
-        `${EMOJIS.ticket_id} **Ticket ID:** \`TICK-${db.ticketCount}\`\n` +
+        `👋 **Hello ${interaction.user}!** Welcome to your support ticket.\n\n` +
+        `• **Category:** \`${selectedType.toUpperCase()}\`\n` +
+        `${EMOJIS.ticket_id} **Ticket ID:** \`TICK-${db.ticketCount}\`\n\n` +
+        `A member of our team will be with you shortly. Use the buttons below to manage this ticket.\n\n` +
         `🔒 **Secured transaction via TITAN Market**`
       )
       .setFooter({ text: 'TITAN Market™ • Official Support' })
@@ -390,11 +561,42 @@ client.on('interactionCreate', async (interaction) => {
 
     const btns = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('claim_ticket').setLabel('Claim Ticket').setStyle(ButtonStyle.Success).setEmoji('✨'),
+      new ButtonBuilder().setCustomId('add_user').setLabel('Add User').setStyle(ButtonStyle.Secondary).setEmoji('➕'),
+      new ButtonBuilder().setCustomId('remove_user').setLabel('Remove User').setStyle(ButtonStyle.Secondary).setEmoji('➖'),
       new ButtonBuilder().setCustomId('close_ticket').setLabel('Close Ticket').setStyle(ButtonStyle.Danger).setEmoji('🔒')
     );
 
     await channel.send({ content: `${interaction.user}`, embeds: [ticketEmbed], components: [btns] });
     await interaction.reply({ content: `✅ Your ticket has been created successfully: ${channel}`, ephemeral: true });
+  }
+
+  // --- 3. MODAL SUBMITS (ADAUGARE / SCOATERE MEMBRU DIN TICKET) ---
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId === 'modal_add_user') {
+      const userId = interaction.fields.getTextInputValue('add_user_id').trim();
+      try {
+        const targetUser = await client.users.fetch(userId);
+        await interaction.channel.permissionOverwrites.edit(targetUser.id, {
+          ViewChannel: true,
+          SendMessages: true,
+          AttachFiles: true
+        });
+        await interaction.reply({ content: `✅ Added ${targetUser} (\`${targetUser.id}\`) to this ticket.` });
+      } catch (err) {
+        await interaction.reply({ content: `❌ Could not find or add user with ID \`${userId}\`. Make sure the ID is correct!`, ephemeral: true });
+      }
+    }
+
+    if (interaction.customId === 'modal_remove_user') {
+      const userId = interaction.fields.getTextInputValue('remove_user_id').trim();
+      try {
+        const targetUser = await client.users.fetch(userId);
+        await interaction.channel.permissionOverwrites.delete(targetUser.id);
+        await interaction.reply({ content: `✅ Removed ${targetUser} (\`${targetUser.id}\`) from this ticket.` });
+      } catch (err) {
+        await interaction.reply({ content: `❌ Could not find or remove user with ID \`${userId}\`. Make sure the ID is correct!`, ephemeral: true });
+      }
+    }
   }
 
   // --- 4. BUTTON ACTIONS ---
@@ -407,10 +609,44 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.update({ embeds: [claimEmbed], components: [
         new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('claimed_disabled').setLabel(`Claimed by ${interaction.user.username}`).setStyle(ButtonStyle.Success).setDisabled(true),
+          new ButtonBuilder().setCustomId('add_user').setLabel('Add User').setStyle(ButtonStyle.Secondary).setEmoji('➕'),
+          new ButtonBuilder().setCustomId('remove_user').setLabel('Remove User').setStyle(ButtonStyle.Secondary).setEmoji('➖'),
           new ButtonBuilder().setCustomId('close_ticket').setLabel('Close Ticket').setStyle(ButtonStyle.Danger).setEmoji('🔒')
         )
       ]});
       await interaction.channel.send(`✨ **Ticket claimed by ${interaction.user}!**`);
+    }
+
+    if (interaction.customId === 'add_user') {
+      const modal = new ModalBuilder()
+        .setCustomId('modal_add_user')
+        .setTitle('Add User to Ticket');
+
+      const userInput = new TextInputBuilder()
+        .setCustomId('add_user_id')
+        .setLabel('User ID to add:')
+        .setPlaceholder('Enter Discord User ID...')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(userInput));
+      await interaction.showModal(modal);
+    }
+
+    if (interaction.customId === 'remove_user') {
+      const modal = new ModalBuilder()
+        .setCustomId('modal_remove_user')
+        .setTitle('Remove User from Ticket');
+
+      const userInput = new TextInputBuilder()
+        .setCustomId('remove_user_id')
+        .setLabel('User ID to remove:')
+        .setPlaceholder('Enter Discord User ID...')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(userInput));
+      await interaction.showModal(modal);
     }
 
     if (interaction.customId === 'close_ticket') {
@@ -459,7 +695,7 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.customId === 'join_gw') {
       const gw = db.giveaways[interaction.message.id];
-      if (!gw) return interaction.reply({ content: '❌ This giveaway is no longer active.', ephemeral: true });
+      if (!gw || gw.ended) return interaction.reply({ content: '❌ This giveaway is no longer active.', ephemeral: true });
 
       if (gw.participants.includes(interaction.user.id)) {
         return interaction.reply({ content: '⚠️ You are already entered in this giveaway!', ephemeral: true });
